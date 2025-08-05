@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
-# Installs required system packages
+# Update package lists
 apt-get update
-apt-get install -y tesseract-ocr poppler-utils
 
+# Install only the required system packages for our application
+apt-get install -y --no-install-recommends poppler-utils
+
+# Clean up the apt cache to keep the image size small
+rm -rf /var/lib/apt/lists/*
