@@ -1,132 +1,139 @@
-# openai_service.py
+# google_ai_service.py
+
 import os
 import json
 import logging
-from openai import AsyncOpenAI
-from prompts import CLASSIFICATION_PROMPT, ANALYSIS_PROMPTS
+import google.generativeai as genai
+from prompts import ANALYSIS_PROMPT
 
-# Load OpenAI credentials
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+# Load Google AI credentials
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-1.5-flash")
 MAX_RETRIES = 3
 
-async def classify_document(text: str) -> dict:
-    """Step 1: Classify the document type with retries."""
-    logging.info("Classifying document type...")
+# Configure Google AI
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel(GOOGLE_MODEL)
+else:
+    model = None
+    logging.warning("Google API key not found. Set GOOGLE_API_KEY environment variable.")
+
+async def analyze_document(text: str) -> dict:
+    """
+    Analyzes the document using Google's Generative AI with retries.
+    This single call handles classification and data extraction.
+    """
+    logging.info("Starting unified document analysis with Google AI...")
+    
+    if not model:
+        logging.error("Google AI model not configured. Please set GOOGLE_API_KEY.")
+        return _get_fallback_response("Google AI not configured")
+    
+    # Use full text for analysis, but consider truncating for very large docs if needed
+    content_to_send = text
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logging.info(f"Attempt {attempt}: Sending classification request to OpenAI...")
-            response = await client.chat.completions.create(
-                model=OPENAI_MODEL,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": CLASSIFICATION_PROMPT},
-                    {"role": "user", "content": text[:4000]}
-                ],
-                temperature=0.2
-            )
-            result = json.loads(response.choices[0].message.content)
-
-            if isinstance(result, dict) and 'document_type' in result:
-                return {"document_type": result['document_type']}
+            logging.info(f"Attempt {attempt}: Sending analysis request to Google AI...")
+            
+            # Create the prompt for Google AI
+            prompt = f"{ANALYSIS_PROMPT}\n\nDocument text to analyze:\n{content_to_send}"
+            
+            response = model.generate_content(prompt)
+            
+            if response.text:
+                content = response.text.strip()
+                # Try to extract JSON from the response
+                try:
+                    # Look for JSON in the response
+                    start_idx = content.find('{')
+                    end_idx = content.rfind('}') + 1
+                    if start_idx != -1 and end_idx != 0:
+                        json_content = content[start_idx:end_idx]
+                        result = json.loads(json_content)
+                    else:
+                        # If no JSON found, try to parse the entire response
+                        result = json.loads(content)
+                    
+                    if isinstance(result, dict):
+                        # Ensure we have the required fields
+                        if 'document_type' not in result:
+                            result['document_type'] = 'Document'
+                        if 'summary' not in result:
+                            result['summary'] = 'Document analyzed successfully'
+                        if 'key_information' not in result:
+                            result['key_information'] = {}
+                        if 'extracted_data' not in result:
+                            result['extracted_data'] = {}
+                        
+                        logging.info("Successfully analyzed document with Google AI.")
+                        return result
+                    else:
+                        logging.warning(f"Attempt {attempt}: Unexpected analysis JSON format. Result: {result}")
+                        # Continue to retry if format is wrong
+                        
+                except json.JSONDecodeError as e:
+                    logging.warning(f"Attempt {attempt} failed with JSON decode error: {e}. Response: {content}")
+                    # Try to create a structured response from the text
+                    if attempt == MAX_RETRIES:
+                        return _create_structured_response_from_text(content)
             else:
-                logging.warning("Unexpected classification format.")
-                return {"document_type": str(result)}
+                logging.warning(f"Attempt {attempt}: Empty response from Google AI")
 
         except Exception as e:
-            logging.warning(f"Attempt {attempt} failed: {e}")
-    logging.error("All classification attempts failed.")
-    return {"document_type": "GeneralDocument"}
+            logging.warning(f"Attempt {attempt} failed with API error: {e}")
+            
+            # Handle rate limiting specifically
+            if "429" in str(e) or "quota" in str(e).lower():
+                logging.warning("Rate limit exceeded. Consider waiting or upgrading your plan.")
+                if attempt == MAX_RETRIES:
+                    return _get_fallback_response("Rate limit exceeded. Please try again later or upgrade your Google AI plan.")
+            
+            if attempt == MAX_RETRIES:
+                logging.error("All analysis attempts failed.")
+                return _get_fallback_response(f"Analysis completed with limited information after {MAX_RETRIES} retries: {str(e)}")
 
-async def analyze_document_by_type(text: str, doc_type: str) -> dict:
-    """Step 2: Analyze the document using a universal analysis prompt with retries."""
-    logging.info(f"Analyzing document. Type: {doc_type}")
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            logging.info(f"Attempt {attempt}: Sending analysis request to OpenAI...")
-            response = await client.chat.completions.create(
-                model=OPENAI_MODEL,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": ANALYSIS_PROMPTS},
-                    {"role": "user", "content": text}
-                ],
-                temperature=0.2
-            )
-            content = response.choices[0].message.content.strip()
-            logging.debug(f"OpenAI response: {content}")
-            result = json.loads(content)
+    # Fallback response if all retries fail to produce a valid dict
+    logging.error("All analysis attempts failed to produce a valid result.")
+    return _get_fallback_response("Analysis completed with fallback method")
 
-            if isinstance(result, dict):
-                return result
-            else:
-                logging.warning("Unexpected analysis format.")
-                return {"result": str(result)}
+def _create_structured_response_from_text(text: str) -> dict:
+    """
+    Creates a structured response from plain text when JSON parsing fails.
+    """
+    return {
+        "language": "Unknown",
+        "document_type": "Document",
+        "summary": text[:500] + "..." if len(text) > 500 else text,
+        "key_information": {
+            "important_details": ["Document processed with text analysis"],
+            "dates": [],
+            "amounts": [],
+            "names": [],
+            "actions_required": []
+        },
+        "extracted_data": {
+            "raw_analysis": text
+        },
+        "error": "JSON parsing failed, using text analysis"
+    }
 
-        except Exception as e:
-            logging.warning(f"Attempt {attempt} failed: {e}")
-    logging.error("All analysis attempts failed.")
-    return {"error": "Failed to analyze document."}
-
-
-
-
- # openai_service.py
-# import os
-# import json
-# import logging
-# from openai import AsyncOpenAI
-# from prompts import CLASSIFICATION_PROMPT, ANALYSIS_PROMPTS  # ANALYSIS_PROMPTS is a string
-
-# # Load OpenAI credentials
-# client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-# OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-
-# async def classify_document(text: str) -> dict:
-#     """Step 1: Classify the document type."""
-#     logging.info("Classifying document type...")
-#     try:
-#         response = await client.chat.completions.create(
-#             model=OPENAI_MODEL,
-#             response_format={"type": "json_object"},
-#             messages=[
-#                 {"role": "system", "content": CLASSIFICATION_PROMPT},
-#                 {"role": "user", "content": text[:4000]}  # Use a snippet for faster classification
-#             ]
-#         )
-#         result = json.loads(response.choices[0].message.content)
-        
-#         # Ensure result is a dict with 'document_type'
-#         if isinstance(result, dict):
-#             doc_type = result.get('document_type', 'GeneralDocument')
-#             return {"document_type": doc_type}
-#         else:
-#             return {"document_type": str(result)}
-    
-#     except Exception as e:
-#         logging.error(f"Error in document classification: {e}")
-#         return {"document_type": "GeneralDocument"}
-
-# async def analyze_document_by_type(text: str, doc_type: str) -> dict:
-#     """Step 2: Analyze the document using a universal analysis prompt."""
-#     logging.info(f"Analyzing document with universal prompt. Detected type: {doc_type}")
-    
-#     try:
-#         response = await client.chat.completions.create(
-#             model=OPENAI_MODEL,
-#             response_format={"type": "json_object"},
-#             messages=[
-#                 {"role": "system", "content": ANALYSIS_PROMPTS},
-#                 {"role": "user", "content": text}
-#             ]
-#         )
-#         result = json.loads(response.choices[0].message.content)
-        
-#         if isinstance(result, dict):
-#             return result
-#         else:
-#             return {"result": str(result)}
-    
-#     except Exception as e:
-#         logging.error(f"Error in document analysis: {e}")
-#         return {"error": "Failed to analyze document."}
+def _get_fallback_response(error_message: str) -> dict:
+    """
+    Returns a fallback response when analysis fails.
+    """
+    return {
+        "language": "Unknown",
+        "document_type": "Document",
+        "summary": "Document analysis completed with limited information due to API errors.",
+        "key_information": {
+            "important_details": ["Document processed with limited analysis"],
+            "dates": [],
+            "amounts": [],
+            "names": [],
+            "actions_required": []
+        },
+        "extracted_data": {},
+        "error": error_message
+    } 
