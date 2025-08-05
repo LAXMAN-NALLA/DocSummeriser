@@ -5,7 +5,7 @@ FROM python:3.10-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# System packages for PDF processing (tesseract removed)
+# System packages for PDF processing
 RUN apt-get update && apt-get install -y \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -20,8 +20,8 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy app code
 COPY . .
 
-# Expose port (used by Gunicorn)
+# Expose port (Render expects EXPOSE, but actual bind uses $PORT)
 EXPOSE 8000
 
-# Start command
+# Start using bash script (dynamic PORT handled here)
 CMD ["bash", "start.sh"]
