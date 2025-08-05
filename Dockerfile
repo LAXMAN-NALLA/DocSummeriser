@@ -1,12 +1,12 @@
+# Dockerfile
 FROM python:3.10-slim
 
 # Set environment
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# System packages for OCR
+# System packages for PDF processing (tesseract removed)
 RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
